@@ -1,0 +1,586 @@
+#!/usr/bin/env python3
+"""
+Anonymous Bot - Telegram бот для анонимных сообщений
+Версия 2.0 с SQLite базой данных
+"""
+
+import os
+import logging
+import uuid
+from dotenv import load_dotenv
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application, CommandHandler, MessageHandler,
+    ContextTypes, ConversationHandler, CallbackQueryHandler, filters
+)
+from database import Database
+
+# Загружаем переменные окружения
+load_dotenv()
+
+# Настройка логирования
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+# Состояния для ConversationHandler
+WAITING_FOR_MESSAGE = 1
+WAITING_FOR_REPLY = 2
+
+# Глобальные переменные
+user_message = {}
+admin_awaiting_reply = {}  # {admin_id: message_id}
+
+# Инициализация базы данных
+db = Database()
+logger.info("✅ База данных SQLite инициализирована")
+
+
+def get_recipients():
+    """Получает список ID получателей из переменной окружения"""
+    recipients_str = os.getenv('RECIPIENTS', os.getenv('ADMIN_ID', ''))
+    if not recipients_str:
+        logger.error("❌ Не указаны получатели сообщений (RECIPIENTS или ADMIN_ID)")
+        return []
+
+    recipients = []
+    for recipient_id in recipients_str.split(','):
+        recipient_id = recipient_id.strip()
+        if recipient_id:
+            try:
+                recipients.append(int(recipient_id))
+            except ValueError:
+                logger.warning(f"⚠️ Некорректный ID получателя: {recipient_id}")
+
+    logger.info(f"📋 Получатели сообщений: {recipients}")
+    return recipients
+
+
+def generate_message_id():
+    """Генерирует уникальный ID для сообщения"""
+    return str(uuid.uuid4())[:8]
+
+
+async def send_to_all_recipients(context, text, reply_markup=None, parse_mode='HTML'):
+    """Отправляет сообщение всем получателям (администраторам и группам)"""
+    recipients = get_recipients()
+    success_count = 0
+    failed_recipients = []
+
+    for recipient_id in recipients:
+        try:
+            await context.bot.send_message(
+                chat_id=recipient_id,
+                text=text,
+                reply_markup=reply_markup,
+                parse_mode=parse_mode
+            )
+            success_count += 1
+            logger.info(f"✅ Сообщение отправлено получателю {recipient_id}")
+        except Exception as e:
+            logger.error(f"❌ Ошибка отправки получателю {recipient_id}: {e}")
+            failed_recipients.append(recipient_id)
+
+    return success_count, failed_recipients
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработчик команды /start"""
+    user = update.effective_user
+    user_id = user.id
+    admin_id = int(os.getenv('ADMIN_ID'))
+
+    # Сохраняем информацию о пользователе в базу данных
+    db.add_or_update_user(
+        user_id=user_id,
+        username=user.username,
+        first_name=user.first_name,
+        last_name=user.last_name,
+        full_name=user.full_name,
+        is_bot=user.is_bot,
+        is_premium=user.is_premium if hasattr(user, 'is_premium') else False,
+        language_code=user.language_code
+    )
+
+    logger.info(f"👤 Пользователь {user_id} ({user.full_name}) использовал /start")
+
+    # Проверяем, является ли пользователь одним из получателей
+    recipients = get_recipients()
+    is_recipient = user_id in recipients
+
+    if is_recipient:
+        welcome_text = """
+👋 Добро пожаловать в Anonymous Bot!
+
+Вы администратор бота. Доступные команды:
+
+/help - Справка
+/myid - Узнать ваш ID
+/messages - Список сообщений
+
+🌐 Веб-интерфейс: http://localhost:5000
+        """
+    else:
+        welcome_text = """
+👋 Добро пожаловать в Anonymous Bot!
+
+Этот бот позволяет отправлять анонимные сообщения.
+
+💬 Просто напишите любое сообщение, и оно будет отправлено!
+
+✅ Ваши сообщения полностью анонимны
+✅ Вы получите ответ прямо в этом чате
+
+Используйте /help для получения дополнительной информации
+        """
+
+        # Уведомляем всех администраторов о новом пользователе
+        user_info = format_user_info(user)
+        notification_text = f"🆕 Новый пользователь запустил бота:\n\n{user_info}"
+
+        try:
+            success_count, failed = await send_to_all_recipients(
+                context=context,
+                text=notification_text,
+                parse_mode='HTML'
+            )
+            logger.info(f"✅ Уведомление о новом пользователе {user_id} отправлено {success_count} получателям")
+            if failed:
+                logger.warning(f"⚠️ Не удалось отправить уведомление получателям: {failed}")
+        except Exception as e:
+            logger.error(f"❌ Ошибка при отправке уведомления о новом пользователе: {e}")
+
+    await update.message.reply_text(welcome_text)
+
+
+def format_user_info(user) -> str:
+    """Форматирует информацию о пользователе для отправки администратору"""
+    user_info_parts = []
+
+    # Имя пользователя с кликабельной ссылкой
+    user_name = user.full_name or user.first_name or "Не указано"
+    user_link = f'<a href="tg://user?id={user.id}">{user_name}</a>'
+    user_info_parts.append(f"👤 От: {user_link}")
+
+    # Username
+    if user.username:
+        user_info_parts.append(f"📱 Username: @{user.username}")
+    else:
+        user_info_parts.append("📱 Username: Не указан")
+
+    # ID пользователя
+    user_info_parts.append(f"🆔 ID: <code>{user.id}</code>")
+
+    # Дополнительная информация
+    if hasattr(user, 'is_premium') and user.is_premium:
+        user_info_parts.append("⭐ Premium: Да")
+
+    if user.language_code:
+        user_info_parts.append(f"🌐 Язык: {user.language_code}")
+
+    return "\n".join(user_info_parts)
+
+
+async def send_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Начало процесса отправки анонимного сообщения"""
+    await update.message.reply_text(
+        "📝 Напишите ваше сообщение (максимум 4096 символов):"
+    )
+    return WAITING_FOR_MESSAGE
+
+
+async def receive_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Получаем сообщение от пользователя и сразу отправляем"""
+    message_text = update.message.text
+    user = update.effective_user
+    user_id = user.id
+
+    if len(message_text) > 4096:
+        await update.message.reply_text(
+            "❌ Сообщение слишком длинное! Максимум 4096 символов."
+        )
+        return WAITING_FOR_MESSAGE
+
+    admin_id = int(os.getenv('ADMIN_ID'))
+
+    try:
+        # Генерируем ID сообщения
+        message_id = generate_message_id()
+
+        # Обновляем информацию о пользователе
+        db.add_or_update_user(
+            user_id=user_id,
+            username=user.username,
+            first_name=user.first_name,
+            last_name=user.last_name,
+            full_name=user.full_name,
+            is_bot=user.is_bot,
+            is_premium=user.is_premium if hasattr(user, 'is_premium') else False,
+            language_code=user.language_code
+        )
+
+        # Сохраняем сообщение в базу данных
+        db.add_message(
+            message_id=message_id,
+            user_id=user_id,
+            message_text=message_text,
+            is_from_admin=False
+        )
+
+        # Формируем информацию о пользователе
+        user_info = format_user_info(user)
+
+        # Создаем кнопку для ответа
+        keyboard = [
+            [InlineKeyboardButton("💬 Ответить", callback_data=f"reply_{message_id}")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        # Отправляем сообщение всем получателям
+        message_text_formatted = f"📨 Новое сообщение:\n\n{user_info}\n\n📝 Текст:\n{message_text}\n\n🔑 Message ID: <code>{message_id}</code>"
+        success_count, failed = await send_to_all_recipients(
+            context=context,
+            text=message_text_formatted,
+            reply_markup=reply_markup,
+            parse_mode='HTML'
+        )
+
+        logger.info(f"📨 Сообщение {message_id} отправлено {success_count} получателям")
+        if failed:
+            logger.warning(f"⚠️ Не удалось отправить получателям: {failed}")
+
+        # Подтверждаем пользователю
+        if success_count > 0:
+            await update.message.reply_text(
+                "✅ Сообщение успешно отправлено!"
+            )
+        else:
+            await update.message.reply_text(
+                "❌ Не удалось отправить сообщение. Попробуйте позже."
+            )
+
+    except Exception as e:
+        logger.error(f"Ошибка при отправке сообщения: {e}")
+        await update.message.reply_text(
+            "❌ Ошибка при отправке сообщения. Попробуйте позже."
+        )
+
+    return ConversationHandler.END
+
+
+async def reply_button_pressed(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Администратор нажимает кнопку 'Ответить'"""
+    query = update.callback_query
+    await query.answer()
+
+    admin_id = query.from_user.id
+    callback_data = query.data
+    message_id = callback_data.replace("reply_", "")
+
+    # Проверяем, что сообщение существует в базе данных
+    message = db.get_message(message_id)
+    if not message:
+        await query.answer("❌ Сообщение не найдено в базе данных", show_alert=True)
+        return ConversationHandler.END
+
+    # Сохраняем информацию о том, что администратор ждет ответа
+    admin_awaiting_reply[admin_id] = message_id
+
+    # Отправляем новое сообщение с запросом ответа (не изменяем оригинальное)
+    await context.bot.send_message(
+        chat_id=admin_id,
+        text=f"💬 Напишите ответ для пользователя (ID сообщения: {message_id}):\n\n"
+             "Введите /cancel для отмены"
+    )
+
+    return WAITING_FOR_REPLY
+
+
+async def receive_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Получаем ответ администратора"""
+    admin_id = update.effective_user.id
+
+    if admin_id not in admin_awaiting_reply:
+        await update.message.reply_text("❌ Ошибка: сеанс ответа не найден")
+        return ConversationHandler.END
+
+    reply_text = update.message.text
+    message_id = admin_awaiting_reply[admin_id]
+
+    # Получаем сообщение из базы данных
+    message = db.get_message(message_id)
+    if not message:
+        await update.message.reply_text("❌ Исходное сообщение не найдено")
+        del admin_awaiting_reply[admin_id]
+        return ConversationHandler.END
+
+    try:
+        user_id = message['user_id']
+
+        # Отправляем ответ пользователю
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=f"💬 Ответ на ваше анонимное сообщение:\n\n{reply_text}"
+        )
+
+        # Сохраняем ответ администратора в базу данных
+        db.add_admin_reply(
+            message_id=message_id,
+            admin_id=admin_id,
+            reply_text=reply_text
+        )
+
+        # Подтверждаем администратору
+        await update.message.reply_text("✅ Ответ отправлен пользователю!")
+
+        # Удаляем из очереди ожидания
+        del admin_awaiting_reply[admin_id]
+
+    except Exception as e:
+        logger.error(f"Ошибка при отправке ответа: {e}")
+        await update.message.reply_text(
+            f"❌ Ошибка при отправке ответа: {e}\nПопробуйте позже."
+        )
+        # Удаляем из очереди ожидания даже при ошибке
+        if admin_id in admin_awaiting_reply:
+            del admin_awaiting_reply[admin_id]
+
+    return ConversationHandler.END
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработчик команды /help"""
+    user_id = update.effective_user.id
+    admin_id = int(os.getenv('ADMIN_ID'))
+    
+    if user_id == admin_id:
+        help_text = """
+📚 Команды администратора:
+
+/help - Справка
+/myid - Узнать ваш ID
+/messages - Список сообщений в базе
+
+📋 Как отвечать на сообщения:
+1. Дождитесь анонимного сообщения
+2. Нажмите кнопку "💬 Ответить"
+3. Напишите свой ответ
+4. Ответ будет отправлен пользователю анонимно
+
+🌐 Веб-интерфейс:
+Откройте http://localhost:5000 для управления сообщениями
+        """
+    else:
+        help_text = """
+📚 Доступные команды:
+
+/start - Начало работы
+/help - Справка
+/cancel - Отменить текущую операцию
+/myid - Узнать ваш ID
+
+ℹ️ Как пользоваться ботом:
+Просто напишите любое сообщение боту, и оно будет анонимно отправлено!
+
+✅ Ваши сообщения полностью анонимны
+✅ Вы получите ответ прямо в этом чате
+4. Ждите ответа
+        """
+    
+    await update.message.reply_text(help_text)
+
+
+async def myid_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработчик команды /myid"""
+    user_id = update.effective_user.id
+    await update.message.reply_text(f"🔍 Ваш ID: `{user_id}`", parse_mode="Markdown")
+
+
+async def messages_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработчик команды /messages (только для администратора)"""
+    user_id = update.effective_user.id
+    admin_id = int(os.getenv('ADMIN_ID'))
+
+    if user_id != admin_id:
+        await update.message.reply_text("❌ Эта команда доступна только администратору")
+        return
+
+    # Получаем все сообщения из базы данных
+    messages = db.get_all_messages()
+
+    if not messages:
+        await update.message.reply_text("📭 Нет сообщений в базе данных")
+        return
+
+    message_list = "📋 Сообщения в базе:\n\n"
+    for msg in messages[:10]:  # Показываем только последние 10
+        message_id = msg['message_id']
+        user_id_msg = msg['user_id']
+        message_text = msg['message_text']
+        has_reply = db.has_reply(message_id)
+
+        message_list += f"ID: {message_id}\n"
+        message_list += f"От пользователя: {user_id_msg}\n"
+        message_list += f"Сообщение: {message_text[:100]}{'...' if len(message_text) > 100 else ''}\n"
+        message_list += f"Статус: {'✅ Отвечено' if has_reply else '⏳ Ожидает ответа'}\n\n"
+
+    if len(messages) > 10:
+        message_list += f"\n... и еще {len(messages) - 10} сообщений\n"
+        message_list += "\n🌐 Откройте веб-интерфейс для просмотра всех сообщений: http://localhost:5001"
+
+    await update.message.reply_text(message_list)
+
+
+async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обработчик команды /cancel"""
+    user_id = update.effective_user.id
+
+    if user_id in user_message:
+        del user_message[user_id]
+
+    if user_id in admin_awaiting_reply:
+        del admin_awaiting_reply[user_id]
+
+    await update.message.reply_text("❌ Операция отменена")
+    return ConversationHandler.END
+
+
+async def handle_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработчик всех текстовых сообщений от пользователей (не команд)"""
+    user = update.effective_user
+    user_id = user.id
+
+    # Получаем список получателей
+    recipients = get_recipients()
+
+    # Если это сообщение от одного из получателей (администраторов), игнорируем
+    if user_id in recipients:
+        return
+
+    # Если это сообщение из группы, игнорируем
+    if update.message.chat.type in ['group', 'supergroup']:
+        return
+
+    message_text = update.message.text
+
+    # Обновляем информацию о пользователе
+    db.add_or_update_user(
+        user_id=user_id,
+        username=user.username,
+        first_name=user.first_name,
+        last_name=user.last_name,
+        full_name=user.full_name,
+        is_bot=user.is_bot,
+        is_premium=user.is_premium if hasattr(user, 'is_premium') else False,
+        language_code=user.language_code
+    )
+
+    # Генерируем уникальный ID для сообщения
+    message_id = generate_message_id()
+
+    # Сохраняем сообщение в базу данных
+    db.add_message(
+        message_id=message_id,
+        user_id=user_id,
+        message_text=message_text,
+        is_from_admin=False
+    )
+
+    # Формируем информацию о пользователе
+    user_info = format_user_info(user)
+
+    # Создаем кнопку "Ответить"
+    keyboard = [[InlineKeyboardButton("💬 Ответить", callback_data=f"reply_{message_id}")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    # Отправляем сообщение всем получателям
+    try:
+        message_text_formatted = f"📩 Новое сообщение:\n\n{user_info}\n\n📝 Текст:\n{message_text}\n\n🔑 Message ID: <code>{message_id}</code>"
+        success_count, failed = await send_to_all_recipients(
+            context=context,
+            text=message_text_formatted,
+            reply_markup=reply_markup,
+            parse_mode='HTML'
+        )
+
+        logger.info(f"Сообщение {message_id} от пользователя {user_id} отправлено {success_count} получателям")
+        if failed:
+            logger.warning(f"⚠️ Не удалось отправить получателям: {failed}")
+
+        # Подтверждаем пользователю
+        if success_count > 0:
+            await update.message.reply_text(
+                "✅ Ваше анонимное сообщение отправлено!\n"
+                "Ожидайте ответа."
+            )
+        else:
+            await update.message.reply_text(
+                "❌ Произошла ошибка при отправке сообщения. Попробуйте позже."
+            )
+
+    except Exception as e:
+        logger.error(f"Ошибка при отправке анонимного сообщения: {e}")
+        await update.message.reply_text(
+            "❌ Произошла ошибка при отправке сообщения. Попробуйте позже."
+        )
+
+
+def main() -> None:
+    """Запуск бота"""
+    # Получаем токен из переменной окружения
+    token = os.getenv('TELEGRAM_BOT_TOKEN')
+
+    if not token:
+        logger.error("TELEGRAM_BOT_TOKEN не установлен в .env файле!")
+        return
+
+    if not os.getenv('ADMIN_ID'):
+        logger.error("ADMIN_ID не установлен в .env файле!")
+        return
+
+    logger.info("✅ База данных SQLite готова к работе")
+
+    # Создаем приложение
+    application = Application.builder().token(token).build()
+    
+    # Добавляем обработчик ConversationHandler для отправки сообщений
+    conv_handler = ConversationHandler(
+        entry_points=[
+            CommandHandler("send", send_command),
+            CallbackQueryHandler(reply_button_pressed, pattern="^reply_")
+        ],
+        states={
+            WAITING_FOR_MESSAGE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_message),
+                CommandHandler("cancel", cancel_command),
+            ],
+            WAITING_FOR_REPLY: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_reply),
+                CommandHandler("cancel", cancel_command),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cancel_command)],
+        per_message=False,
+        per_chat=True,
+        per_user=True,
+    )
+
+    # Регистрируем обработчики команд
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("myid", myid_command))
+    application.add_handler(CommandHandler("messages", messages_command))
+    application.add_handler(conv_handler)
+
+    # Обработчик всех текстовых сообщений (должен быть последним!)
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_any_message))
+
+    # Запускаем бота
+    logger.info("🤖 Бот запущен...")
+    application.run_polling()
+
+
+if __name__ == '__main__':
+    main()

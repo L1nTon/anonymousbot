@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Anonymous Bot - Панель управления</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <!-- Заголовок -->
+        <header class="header">
+            <h1>🤖 Anonymous Bot</h1>
+            <div class="stats" id="stats">
+                <div class="stat-item">
+                    <span class="stat-label">Всего сообщений:</span>
+                    <span class="stat-value" id="total-messages">0</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">Без ответа:</span>
+                    <span class="stat-value unanswered" id="unanswered-messages">0</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">Пользователей:</span>
+                    <span class="stat-value" id="unique-users">0</span>
+                </div>
+            </div>
+        </header>
+
+        <div class="main-content">
+            <!-- Список чатов -->
+            <aside class="chats-sidebar">
+                <div class="sidebar-header">
+                    <h2>Чаты</h2>
+                    <button class="refresh-btn" onclick="loadChats()">🔄</button>
+                </div>
+                <div class="chats-list" id="chats-list">
+                    <div class="loading">Загрузка...</div>
+                </div>
+            </aside>
+
+            <!-- Область сообщений -->
+            <main class="messages-area">
+                <div class="welcome-screen" id="welcome-screen">
+                    <div class="welcome-content">
+                        <h2>👋 Добро пожаловать!</h2>
+                        <p>Выберите чат слева, чтобы просмотреть сообщения</p>
+                    </div>
+                </div>
+
+                <div class="chat-container" id="chat-container" style="display: none;">
+                    <div class="chat-header" id="chat-header">
+                        <div class="user-info">
+                            <h3 id="chat-user-name">Пользователь</h3>
+                            <span class="user-id" id="chat-user-id">ID: </span>
+                        </div>
+                        <button class="new-message-btn" onclick="toggleNewMessageForm()">
+                            ✉️ Написать сообщение
+                        </button>
+                    </div>
+
+                    <!-- Форма для нового сообщения -->
+                    <div class="new-message-form" id="new-message-form" style="display: none;">
+                        <div class="form-header">
+                            <h4>📩 Новое сообщение пользователю</h4>
+                            <button class="close-btn" onclick="toggleNewMessageForm()">✕</button>
+                        </div>
+                        <textarea
+                            id="new-message-input"
+                            placeholder="Введите сообщение..."
+                            rows="4"
+                        ></textarea>
+                        <div class="form-actions">
+                            <button class="cancel-btn" onclick="toggleNewMessageForm()">Отмена</button>
+                            <button class="send-new-btn" onclick="sendNewMessage()">
+                                📤 Отправить
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="messages-container" id="messages-container">
+                        <!-- Сообщения будут загружены здесь -->
+                    </div>
+
+                    <div class="reply-form">
+                        <textarea 
+                            id="reply-input" 
+                            placeholder="Напишите ответ..." 
+                            rows="3"
+                        ></textarea>
+                        <button class="send-btn" onclick="sendReply()">
+                            📤 Отправить
+                        </button>
+                    </div>
+                </div>
+            </main>
+        </div>
+    </div>
+
+    <script src="/static/js/app.js"></script>
+</body>
+</html>
+
