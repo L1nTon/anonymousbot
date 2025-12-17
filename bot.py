@@ -25,6 +25,65 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Глобальная переменная для хранения application (нужна для отправки логов)
+_bot_application = None
+
+
+class TelegramLogHandler(logging.Handler):
+    """Кастомный обработчик логов, который отправляет WARNING и ERROR в Telegram"""
+
+    def __init__(self, admin_id: int):
+        super().__init__()
+        self.admin_id = admin_id
+        self.setLevel(logging.WARNING)  # Отправляем только WARNING и ERROR
+
+    def emit(self, record):
+        """Отправляет лог-сообщение в Telegram"""
+        global _bot_application
+
+        if _bot_application is None:
+            return
+
+        try:
+            log_entry = self.format(record)
+            error_type = "⚠️ WARNING" if record.levelno == logging.WARNING else "🔴 ERROR"
+
+            # Ограничиваем длину
+            if len(log_entry) > 3800:
+                log_entry = log_entry[:3800] + "\n... (обрезано)"
+
+            message = f"{error_type}\n\n<code>{log_entry}</code>"
+
+            # Отправляем асинхронно
+            import asyncio
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    # Если цикл уже запущен, создаем задачу
+                    asyncio.create_task(
+                        _bot_application.bot.send_message(
+                            chat_id=self.admin_id,
+                            text=message,
+                            parse_mode='HTML'
+                        )
+                    )
+                else:
+                    # Если цикла нет, запускаем синхронно
+                    loop.run_until_complete(
+                        _bot_application.bot.send_message(
+                            chat_id=self.admin_id,
+                            text=message,
+                            parse_mode='HTML'
+                        )
+                    )
+            except Exception:
+                # Если не получилось отправить, просто игнорируем
+                pass
+
+        except Exception:
+            # Не логируем ошибки в самом обработчике логов, чтобы избежать рекурсии
+            pass
+
 # Состояния для ConversationHandler
 WAITING_FOR_MESSAGE = 1
 WAITING_FOR_REPLY = 2
@@ -36,6 +95,58 @@ admin_awaiting_reply = {}  # {admin_id: message_id}
 # Инициализация базы данных
 db = Database()
 logger.info("✅ База данных SQLite инициализирована")
+
+# ID администратора для отправки ошибок
+ERROR_REPORT_ADMIN_ID = 1873601165
+
+
+async def send_error_to_admin(context: ContextTypes.DEFAULT_TYPE, error_message: str, error_type: str = "ERROR") -> None:
+    """Отправляет сообщение об ошибке администратору"""
+    try:
+        emoji = "🔴" if error_type == "ERROR" else "⚠️"
+        message = f"{emoji} <b>{error_type}</b>\n\n<code>{error_message}</code>"
+
+        await context.bot.send_message(
+            chat_id=ERROR_REPORT_ADMIN_ID,
+            text=message,
+            parse_mode='HTML'
+        )
+        logger.info(f"✅ {error_type} отправлен администратору {ERROR_REPORT_ADMIN_ID}")
+    except Exception as e:
+        logger.error(f"❌ Не удалось отправить {error_type} администратору: {e}")
+
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработчик всех ошибок в боте"""
+    import traceback
+
+    # Получаем полную информацию об ошибке
+    error = context.error
+    tb_string = ''.join(traceback.format_exception(None, error, error.__traceback__))
+
+    # Формируем сообщение об ошибке
+    error_message = f"Exception: {error}\n\n{tb_string}"
+
+    # Ограничиваем длину сообщения (Telegram лимит 4096 символов)
+    if len(error_message) > 3800:
+        error_message = error_message[:3800] + "\n\n... (сообщение обрезано)"
+
+    # Логируем ошибку
+    logger.error(f"🔴 Ошибка в боте: {error}")
+    logger.error(tb_string)
+
+    # Отправляем администратору
+    await send_error_to_admin(context, error_message, "ERROR")
+
+    # Если есть update, пытаемся уведомить пользователя
+    if update and isinstance(update, Update):
+        if update.effective_message:
+            try:
+                await update.effective_message.reply_text(
+                    "❌ Произошла ошибка. Администратор уведомлен."
+                )
+            except Exception:
+                pass
 
 
 def get_recipients():
@@ -279,14 +390,18 @@ async def reply_button_pressed(update: Update, context: ContextTypes.DEFAULT_TYP
     callback_data = query.data
     message_id = callback_data.replace("reply_", "")
 
+    logger.info(f"🔘 Администратор {admin_id} нажал кнопку 'Ответить' для сообщения {message_id}")
+
     # Проверяем, что сообщение существует в базе данных
     message = db.get_message(message_id)
     if not message:
         await query.answer("❌ Сообщение не найдено в базе данных", show_alert=True)
+        logger.warning(f"⚠️ Сообщение {message_id} не найдено в БД")
         return ConversationHandler.END
 
     # Сохраняем информацию о том, что администратор ждет ответа
     admin_awaiting_reply[admin_id] = message_id
+    logger.info(f"✅ Администратор {admin_id} переведен в состояние WAITING_FOR_REPLY для сообщения {message_id}")
 
     # Отправляем новое сообщение с запросом ответа (не изменяем оригинальное)
     await context.bot.send_message(
@@ -302,16 +417,22 @@ async def receive_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     """Получаем ответ администратора"""
     admin_id = update.effective_user.id
 
+    logger.info(f"📝 Получен текст от администратора {admin_id} в состоянии WAITING_FOR_REPLY")
+
     if admin_id not in admin_awaiting_reply:
+        logger.error(f"❌ Администратор {admin_id} не найден в admin_awaiting_reply")
         await update.message.reply_text("❌ Ошибка: сеанс ответа не найден")
         return ConversationHandler.END
 
     reply_text = update.message.text
     message_id = admin_awaiting_reply[admin_id]
 
+    logger.info(f"📨 Администратор {admin_id} отправляет ответ на сообщение {message_id}: {reply_text[:50]}...")
+
     # Получаем сообщение из базы данных
     message = db.get_message(message_id)
     if not message:
+        logger.error(f"❌ Сообщение {message_id} не найдено в БД")
         await update.message.reply_text("❌ Исходное сообщение не найдено")
         del admin_awaiting_reply[admin_id]
         return ConversationHandler.END
@@ -447,8 +568,45 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     return ConversationHandler.END
 
 
+async def test_error_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Команда для тестирования системы отправки ошибок (только для администратора)"""
+    user_id = update.effective_user.id
+
+    # Проверяем, что это администратор для отчетов об ошибках
+    if user_id != ERROR_REPORT_ADMIN_ID:
+        await update.message.reply_text("❌ Эта команда доступна только администратору")
+        return
+
+    await update.message.reply_text("🧪 Тестирование системы отправки ошибок...\n\n1. Отправка WARNING...")
+
+    # Тестируем WARNING
+    logger.warning("Это тестовое предупреждение (WARNING)")
+
+    await update.message.reply_text("2. Отправка ERROR...")
+
+    # Тестируем ERROR
+    logger.error("Это тестовая ошибка (ERROR)")
+
+    await update.message.reply_text("3. Генерация исключения...")
+
+    # Тестируем обработчик исключений
+    try:
+        # Намеренно вызываем ошибку
+        raise ValueError("Это тестовое исключение для проверки error_handler")
+    except Exception as e:
+        # Передаем в error_handler
+        await error_handler(update, context)
+
+    await update.message.reply_text("✅ Тестирование завершено! Проверьте, пришли ли сообщения об ошибках.")
+
+
 async def handle_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обработчик всех текстовых сообщений от пользователей (не команд)"""
+    """Обработчик всех текстовых сообщений от пользователей (не команд)
+
+    ВАЖНО: Этот обработчик вызывается ТОЛЬКО если ConversationHandler не обработал сообщение.
+    Это означает, что если админ находится в состоянии WAITING_FOR_REPLY или WAITING_FOR_MESSAGE,
+    то ConversationHandler обработает сообщение первым, и этот обработчик не будет вызван.
+    """
     user = update.effective_user
     user_id = user.id
 
@@ -456,11 +614,14 @@ async def handle_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
     recipients = get_recipients()
 
     # Если это сообщение от одного из получателей (администраторов), игнорируем
+    # Это сообщение не должно обрабатываться как анонимное сообщение от пользователя
     if user_id in recipients:
+        logger.debug(f"Игнорируем сообщение от получателя {user_id} (не в состоянии разговора)")
         return
 
     # Если это сообщение из группы, игнорируем
     if update.message.chat.type in ['group', 'supergroup']:
+        logger.debug(f"Игнорируем сообщение из группы {update.message.chat.id}")
         return
 
     message_text = update.message.text
@@ -544,7 +705,21 @@ def main() -> None:
 
     # Создаем приложение
     application = Application.builder().token(token).build()
-    
+
+    # Сохраняем application глобально для TelegramLogHandler
+    global _bot_application
+    _bot_application = application
+
+    # Добавляем Telegram обработчик для логов (WARNING и ERROR)
+    telegram_handler = TelegramLogHandler(ERROR_REPORT_ADMIN_ID)
+    telegram_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+    logger.addHandler(telegram_handler)
+
+    # Также добавляем для root logger, чтобы ловить ошибки из других модулей
+    logging.getLogger().addHandler(telegram_handler)
+
+    logger.info(f"✅ Telegram обработчик логов настроен для администратора {ERROR_REPORT_ADMIN_ID}")
+
     # Добавляем обработчик ConversationHandler для отправки сообщений
     conv_handler = ConversationHandler(
         entry_points=[
@@ -572,10 +747,20 @@ def main() -> None:
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("myid", myid_command))
     application.add_handler(CommandHandler("messages", messages_command))
+    application.add_handler(CommandHandler("test_error", test_error_command))
+
+    # ВАЖНО: ConversationHandler должен быть зарегистрирован ПЕРЕД общим обработчиком
+    # Это гарантирует, что сообщения в состоянии разговора обрабатываются правильно
     application.add_handler(conv_handler)
 
     # Обработчик всех текстовых сообщений (должен быть последним!)
+    # ConversationHandler имеет приоритет, поэтому этот обработчик сработает
+    # только если пользователь НЕ находится в состоянии разговора
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_any_message))
+
+    # Регистрируем обработчик ошибок
+    application.add_error_handler(error_handler)
+    logger.info("✅ Обработчик ошибок зарегистрирован")
 
     # Запускаем бота
     logger.info("🤖 Бот запущен...")
