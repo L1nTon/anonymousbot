@@ -54,28 +54,25 @@ class TelegramLogHandler(logging.Handler):
 
             message = f"{error_type}\n\n<code>{log_entry}</code>"
 
-            # Отправляем асинхронно
+            # Отправляем асинхронно. emit может вызываться из любого потока,
+            # поэтому используем get_running_loop() с защитой.
             import asyncio
             try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    # Если цикл уже запущен, создаем задачу
-                    asyncio.create_task(
-                        _bot_application.bot.send_message(
-                            chat_id=self.admin_id,
-                            text=message,
-                            parse_mode='HTML'
-                        )
-                    )
-                else:
-                    # Если цикла нет, запускаем синхронно
-                    loop.run_until_complete(
-                        _bot_application.bot.send_message(
-                            chat_id=self.admin_id,
-                            text=message,
-                            parse_mode='HTML'
-                        )
-                    )
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                # Нет запущенного event loop в текущем потоке — пропускаем,
+                # чтобы не блокировать логирование.
+                return
+
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    _bot_application.bot.send_message(
+                        chat_id=self.admin_id,
+                        text=message,
+                        parse_mode='HTML'
+                    ),
+                    loop
+                )
             except Exception:
                 # Если не получилось отправить, просто игнорируем
                 pass
@@ -174,6 +171,63 @@ def generate_message_id():
     return str(uuid.uuid4())[:8]
 
 
+# Фильтр для всех типов сообщений, которые может слать пользователь.
+# filters.ATTACHMENT в python-telegram-bot покрывает большинство медиа,
+# но мы перечислим явно для надёжности и поддержки всех версий.
+MEDIA_FILTER = (
+    filters.TEXT
+    | filters.PHOTO
+    | filters.VIDEO
+    | filters.Document.ALL
+    | filters.AUDIO
+    | filters.VOICE
+    | filters.VIDEO_NOTE
+    | filters.Sticker.ALL
+    | filters.ANIMATION
+) & ~filters.COMMAND
+
+
+def extract_media_info(message):
+    """Извлекает (media_type, file_id, file_unique_id, caption) из telegram Message.
+
+    Возвращает (None, None, None, None) для чисто текстовых сообщений.
+    """
+    if message is None:
+        return None, None, None, None
+
+    if message.photo:
+        # PhotoSize отсортирован от меньшего к большему — берём максимальный
+        photo = message.photo[-1]
+        return 'photo', photo.file_id, photo.file_unique_id, message.caption
+    if message.video:
+        return 'video', message.video.file_id, message.video.file_unique_id, message.caption
+    if message.animation:
+        return 'animation', message.animation.file_id, message.animation.file_unique_id, message.caption
+    if message.document:
+        return 'document', message.document.file_id, message.document.file_unique_id, message.caption
+    if message.audio:
+        return 'audio', message.audio.file_id, message.audio.file_unique_id, message.caption
+    if message.voice:
+        return 'voice', message.voice.file_id, message.voice.file_unique_id, None
+    if message.video_note:
+        return 'video_note', message.video_note.file_id, message.video_note.file_unique_id, None
+    if message.sticker:
+        return 'sticker', message.sticker.file_id, message.sticker.file_unique_id, None
+    return None, None, None, None
+
+
+MEDIA_TYPE_LABELS = {
+    'photo': '🖼 Фото',
+    'video': '🎥 Видео',
+    'animation': '🎞 GIF',
+    'document': '📄 Документ',
+    'audio': '🎵 Аудио',
+    'voice': '🎤 Голосовое',
+    'video_note': '🎬 Кружок',
+    'sticker': '😀 Стикер',
+}
+
+
 async def send_to_all_recipients(context, text, reply_markup=None, parse_mode='HTML'):
     """Отправляет сообщение всем получателям (администраторам и группам)"""
     recipients = get_recipients()
@@ -239,12 +293,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 Этот бот позволяет отправлять анонимные сообщения.
 
-💬 Просто напишите любое сообщение, и оно будет отправлено!
+💬 Просто пришлите что угодно — текст, фото, видео, документ,
+голосовое, кружок, стикер или GIF — и оно будет отправлено!
 
-✅ Ваши сообщения полностью анонимны
-✅ Вы получите ответ прямо в этом чате
+✅ Сообщения полностью анонимны
+✅ Ответ придёт прямо в этом чате
 
-Используйте /help для получения дополнительной информации
+Используйте /help для дополнительной информации
         """
 
         # Уведомляем всех администраторов о новом пользователе
@@ -303,24 +358,21 @@ async def send_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 
 
 async def receive_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Получаем сообщение от пользователя и сразу отправляем"""
-    message_text = update.message.text
+    """Получаем сообщение от пользователя (текст или медиа) и сразу отправляем"""
     user = update.effective_user
     user_id = user.id
+    msg = update.message
 
-    if len(message_text) > 4096:
-        await update.message.reply_text(
-            "❌ Сообщение слишком длинное! Максимум 4096 символов."
-        )
+    text = msg.text or ''
+    media_type, file_id, file_unique_id, caption = extract_media_info(msg)
+
+    if text and len(text) > 4096:
+        await msg.reply_text("❌ Сообщение слишком длинное! Максимум 4096 символов.")
         return WAITING_FOR_MESSAGE
 
-    admin_id = int(os.getenv('ADMIN_ID'))
-
     try:
-        # Генерируем ID сообщения
         message_id = generate_message_id()
 
-        # Обновляем информацию о пользователе
         db.add_or_update_user(
             user_id=user_id,
             username=user.username,
@@ -332,51 +384,36 @@ async def receive_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             language_code=user.language_code
         )
 
-        # Сохраняем сообщение в базу данных
+        text_for_db = text or caption or ''
         db.add_message(
             message_id=message_id,
             user_id=user_id,
-            message_text=message_text,
-            is_from_admin=False
+            message_text=text_for_db,
+            is_from_admin=False,
+            media_type=media_type,
+            file_id=file_id,
+            file_unique_id=file_unique_id,
+            caption=caption,
+            tg_message_id=msg.message_id,
+            tg_chat_id=msg.chat.id,
         )
 
-        # Формируем информацию о пользователе
-        user_info = format_user_info(user)
-
-        # Создаем кнопку для ответа
-        keyboard = [
-            [InlineKeyboardButton("💬 Ответить", callback_data=f"reply_{message_id}")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-
-        # Отправляем сообщение всем получателям
-        message_text_formatted = f"📨 Новое сообщение:\n\n{user_info}\n\n📝 Текст:\n{message_text}\n\n🔑 Message ID: <code>{message_id}</code>"
-        success_count, failed = await send_to_all_recipients(
-            context=context,
-            text=message_text_formatted,
-            reply_markup=reply_markup,
-            parse_mode='HTML'
+        success_count, failed = await _forward_message_to_admins(
+            context=context, update=update, message_id=message_id
         )
 
         logger.info(f"📨 Сообщение {message_id} отправлено {success_count} получателям")
         if failed:
             logger.warning(f"⚠️ Не удалось отправить получателям: {failed}")
 
-        # Подтверждаем пользователю
         if success_count > 0:
-            await update.message.reply_text(
-                "✅ Сообщение успешно отправлено!"
-            )
+            await msg.reply_text("✅ Сообщение успешно отправлено!")
         else:
-            await update.message.reply_text(
-                "❌ Не удалось отправить сообщение. Попробуйте позже."
-            )
+            await msg.reply_text("❌ Не удалось отправить сообщение. Попробуйте позже.")
 
     except Exception as e:
         logger.error(f"Ошибка при отправке сообщения: {e}")
-        await update.message.reply_text(
-            "❌ Ошибка при отправке сообщения. Попробуйте позже."
-        )
+        await msg.reply_text("❌ Ошибка при отправке сообщения. Попробуйте позже.")
 
     return ConversationHandler.END
 
@@ -414,57 +451,65 @@ async def reply_button_pressed(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def receive_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Получаем ответ администратора"""
+    """Получаем ответ администратора (текст или медиа) и доставляем пользователю."""
     admin_id = update.effective_user.id
+    msg = update.message
 
-    logger.info(f"📝 Получен текст от администратора {admin_id} в состоянии WAITING_FOR_REPLY")
+    logger.info(f"📝 Получен ответ от администратора {admin_id}")
 
     if admin_id not in admin_awaiting_reply:
         logger.error(f"❌ Администратор {admin_id} не найден в admin_awaiting_reply")
-        await update.message.reply_text("❌ Ошибка: сеанс ответа не найден")
+        await msg.reply_text("❌ Ошибка: сеанс ответа не найден")
         return ConversationHandler.END
 
-    reply_text = update.message.text
     message_id = admin_awaiting_reply[admin_id]
-
-    logger.info(f"📨 Администратор {admin_id} отправляет ответ на сообщение {message_id}: {reply_text[:50]}...")
-
-    # Получаем сообщение из базы данных
     message = db.get_message(message_id)
     if not message:
         logger.error(f"❌ Сообщение {message_id} не найдено в БД")
-        await update.message.reply_text("❌ Исходное сообщение не найдено")
+        await msg.reply_text("❌ Исходное сообщение не найдено")
         del admin_awaiting_reply[admin_id]
         return ConversationHandler.END
 
+    reply_text = msg.text or ''
+    media_type, file_id, file_unique_id, caption = extract_media_info(msg)
+    user_id = message['user_id']
+
     try:
-        user_id = message['user_id']
+        if media_type:
+            # Уведомительный заголовок (чтобы пользователь понимал, что это ответ)
+            type_label = MEDIA_TYPE_LABELS.get(media_type, '💬 Медиа')
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=f"💬 Ответ на ваше сообщение ({type_label}):"
+            )
+            # Копируем медиа админа в чат пользователя — без следов отправителя
+            await context.bot.copy_message(
+                chat_id=user_id,
+                from_chat_id=msg.chat.id,
+                message_id=msg.message_id,
+            )
+        else:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=f"💬 Ответ на ваше анонимное сообщение:\n\n{reply_text}"
+            )
 
-        # Отправляем ответ пользователю
-        await context.bot.send_message(
-            chat_id=user_id,
-            text=f"💬 Ответ на ваше анонимное сообщение:\n\n{reply_text}"
-        )
-
-        # Сохраняем ответ администратора в базу данных
         db.add_admin_reply(
             message_id=message_id,
             admin_id=admin_id,
-            reply_text=reply_text
+            reply_text=reply_text or caption or '',
+            media_type=media_type,
+            file_id=file_id,
+            file_unique_id=file_unique_id,
+            caption=caption,
         )
 
-        # Подтверждаем администратору
-        await update.message.reply_text("✅ Ответ отправлен пользователю!")
-
-        # Удаляем из очереди ожидания
+        await msg.reply_text("✅ Ответ отправлен пользователю!")
         del admin_awaiting_reply[admin_id]
 
     except Exception as e:
         logger.error(f"Ошибка при отправке ответа: {e}")
-        await update.message.reply_text(
-            f"❌ Ошибка при отправке ответа: {e}\nПопробуйте позже."
-        )
-        # Удаляем из очереди ожидания даже при ошибке
+        await msg.reply_text(f"❌ Ошибка при отправке ответа: {e}\nПопробуйте позже.")
         if admin_id in admin_awaiting_reply:
             del admin_awaiting_reply[admin_id]
 
@@ -507,7 +552,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 ✅ Ваши сообщения полностью анонимны
 ✅ Вы получите ответ прямо в этом чате
-4. Ждите ответа
         """
     
     await update.message.reply_text(help_text)
@@ -548,8 +592,9 @@ async def messages_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         message_list += f"Статус: {'✅ Отвечено' if has_reply else '⏳ Ожидает ответа'}\n\n"
 
     if len(messages) > 10:
+        web_port = os.getenv('WEB_PORT', '5000')
         message_list += f"\n... и еще {len(messages) - 10} сообщений\n"
-        message_list += "\n🌐 Откройте веб-интерфейс для просмотра всех сообщений: http://localhost:5001"
+        message_list += f"\n🌐 Откройте веб-интерфейс для просмотра всех сообщений: http://localhost:{web_port}"
 
     await update.message.reply_text(message_list)
 
@@ -600,31 +645,78 @@ async def test_error_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await update.message.reply_text("✅ Тестирование завершено! Проверьте, пришли ли сообщения об ошибках.")
 
 
-async def handle_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обработчик всех текстовых сообщений от пользователей (не команд)
+async def _forward_message_to_admins(context: ContextTypes.DEFAULT_TYPE, update: Update,
+                                     message_id: str) -> tuple[int, list]:
+    """Отправляет всем получателям информацию о пользователе + копию сообщения.
 
-    ВАЖНО: Этот обработчик вызывается ТОЛЬКО если ConversationHandler не обработал сообщение.
-    Это означает, что если админ находится в состоянии WAITING_FOR_REPLY или WAITING_FOR_MESSAGE,
-    то ConversationHandler обработает сообщение первым, и этот обработчик не будет вызван.
+    Сначала шлёт текстовый info-блок, затем `copy_message` с инлайн-кнопкой
+    «Ответить» — это работает для любого типа медиа (текст, фото, видео,
+    документ, голосовое, кружок, стикер, GIF, аудио).
+    """
+    user = update.effective_user
+    msg = update.message
+    user_info = format_user_info(user)
+    media_type, _, _, _ = extract_media_info(msg)
+    type_label = MEDIA_TYPE_LABELS.get(media_type, '💬 Текст') if media_type else '💬 Текст'
+
+    info_text = (
+        f"📩 Новое сообщение\n\n"
+        f"{user_info}\n\n"
+        f"📦 Тип: {type_label}\n"
+        f"🔑 ID: <code>{message_id}</code>"
+    )
+
+    keyboard = [[InlineKeyboardButton("💬 Ответить", callback_data=f"reply_{message_id}")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    recipients = get_recipients()
+    success_count = 0
+    failed = []
+
+    for rid in recipients:
+        try:
+            await context.bot.send_message(
+                chat_id=rid, text=info_text, parse_mode='HTML'
+            )
+            await context.bot.copy_message(
+                chat_id=rid,
+                from_chat_id=msg.chat.id,
+                message_id=msg.message_id,
+                reply_markup=reply_markup,
+            )
+            success_count += 1
+            logger.info(f"✅ Сообщение {message_id} ({type_label}) доставлено {rid}")
+        except Exception as e:
+            logger.error(f"❌ Ошибка отправки получателю {rid}: {e}")
+            failed.append(rid)
+
+    return success_count, failed
+
+
+async def handle_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработчик любых сообщений (текст и медиа) от пользователей.
+
+    ВАЖНО: вызывается ТОЛЬКО если ConversationHandler не обработал сообщение.
+    Если админ в состоянии WAITING_FOR_REPLY/WAITING_FOR_MESSAGE — обработает
+    ConversationHandler.
     """
     user = update.effective_user
     user_id = user.id
+    msg = update.message
 
-    # Получаем список получателей
+    if msg is None:
+        return
+
+    # Игнорируем сообщения от получателей (админов) вне состояний разговора
     recipients = get_recipients()
-
-    # Если это сообщение от одного из получателей (администраторов), игнорируем
-    # Это сообщение не должно обрабатываться как анонимное сообщение от пользователя
     if user_id in recipients:
-        logger.debug(f"Игнорируем сообщение от получателя {user_id} (не в состоянии разговора)")
+        logger.debug(f"Игнорируем сообщение от получателя {user_id}")
         return
 
-    # Если это сообщение из группы, игнорируем
-    if update.message.chat.type in ['group', 'supergroup']:
-        logger.debug(f"Игнорируем сообщение из группы {update.message.chat.id}")
+    # Игнорируем сообщения из групп
+    if msg.chat.type in ['group', 'supergroup']:
+        logger.debug(f"Игнорируем сообщение из группы {msg.chat.id}")
         return
-
-    message_text = update.message.text
 
     # Обновляем информацию о пользователе
     db.add_or_update_user(
@@ -638,52 +730,47 @@ async def handle_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
         language_code=user.language_code
     )
 
-    # Генерируем уникальный ID для сообщения
+    # Извлекаем медиа и текст
+    media_type, file_id, file_unique_id, caption = extract_media_info(msg)
+    text = msg.text or ''
+    # Если это был медиа-контент с подписью — сохраним подпись как основной текст для веба
+    if not text and caption:
+        text = caption
+
     message_id = generate_message_id()
 
-    # Сохраняем сообщение в базу данных
     db.add_message(
         message_id=message_id,
         user_id=user_id,
-        message_text=message_text,
-        is_from_admin=False
+        message_text=text,
+        is_from_admin=False,
+        media_type=media_type,
+        file_id=file_id,
+        file_unique_id=file_unique_id,
+        caption=caption,
+        tg_message_id=msg.message_id,
+        tg_chat_id=msg.chat.id,
     )
 
-    # Формируем информацию о пользователе
-    user_info = format_user_info(user)
-
-    # Создаем кнопку "Ответить"
-    keyboard = [[InlineKeyboardButton("💬 Ответить", callback_data=f"reply_{message_id}")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    # Отправляем сообщение всем получателям
     try:
-        message_text_formatted = f"📩 Новое сообщение:\n\n{user_info}\n\n📝 Текст:\n{message_text}\n\n🔑 Message ID: <code>{message_id}</code>"
-        success_count, failed = await send_to_all_recipients(
-            context=context,
-            text=message_text_formatted,
-            reply_markup=reply_markup,
-            parse_mode='HTML'
+        success_count, failed = await _forward_message_to_admins(
+            context=context, update=update, message_id=message_id
         )
-
-        logger.info(f"Сообщение {message_id} от пользователя {user_id} отправлено {success_count} получателям")
         if failed:
             logger.warning(f"⚠️ Не удалось отправить получателям: {failed}")
 
-        # Подтверждаем пользователю
         if success_count > 0:
-            await update.message.reply_text(
-                "✅ Ваше анонимное сообщение отправлено!\n"
-                "Ожидайте ответа."
+            await msg.reply_text(
+                "✅ Ваше анонимное сообщение отправлено!\nОжидайте ответа."
             )
         else:
-            await update.message.reply_text(
+            await msg.reply_text(
                 "❌ Произошла ошибка при отправке сообщения. Попробуйте позже."
             )
 
     except Exception as e:
         logger.error(f"Ошибка при отправке анонимного сообщения: {e}")
-        await update.message.reply_text(
+        await msg.reply_text(
             "❌ Произошла ошибка при отправке сообщения. Попробуйте позже."
         )
 
@@ -710,12 +797,11 @@ def main() -> None:
     global _bot_application
     _bot_application = application
 
-    # Добавляем Telegram обработчик для логов (WARNING и ERROR)
+    # Добавляем Telegram обработчик для логов (WARNING и ERROR).
+    # Регистрируем только на root logger, чтобы не получать дубли:
+    # модульный logger всё равно пробрасывает события вверх.
     telegram_handler = TelegramLogHandler(ERROR_REPORT_ADMIN_ID)
     telegram_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
-    logger.addHandler(telegram_handler)
-
-    # Также добавляем для root logger, чтобы ловить ошибки из других модулей
     logging.getLogger().addHandler(telegram_handler)
 
     logger.info(f"✅ Telegram обработчик логов настроен для администратора {ERROR_REPORT_ADMIN_ID}")
@@ -728,12 +814,12 @@ def main() -> None:
         ],
         states={
             WAITING_FOR_MESSAGE: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_message),
                 CommandHandler("cancel", cancel_command),
+                MessageHandler(MEDIA_FILTER, receive_message),
             ],
             WAITING_FOR_REPLY: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_reply),
                 CommandHandler("cancel", cancel_command),
+                MessageHandler(MEDIA_FILTER, receive_reply),
             ],
         },
         fallbacks=[CommandHandler("cancel", cancel_command)],
@@ -753,10 +839,10 @@ def main() -> None:
     # Это гарантирует, что сообщения в состоянии разговора обрабатываются правильно
     application.add_handler(conv_handler)
 
-    # Обработчик всех текстовых сообщений (должен быть последним!)
+    # Обработчик всех сообщений от пользователей (текст + медиа), должен быть последним!
     # ConversationHandler имеет приоритет, поэтому этот обработчик сработает
-    # только если пользователь НЕ находится в состоянии разговора
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_any_message))
+    # только если пользователь НЕ находится в состоянии разговора.
+    application.add_handler(MessageHandler(MEDIA_FILTER, handle_any_message))
 
     # Регистрируем обработчик ошибок
     application.add_error_handler(error_handler)

@@ -3,101 +3,140 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Anonymous Bot - Панель управления</title>
+    <title>Anonymous Bot — панель управления</title>
     <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%A4%96%3C/text%3E%3C/svg%3E">
 </head>
 <body>
-    <div class="container">
-        <!-- Заголовок -->
+    <div class="app">
+        <!-- Шапка -->
         <header class="header">
-            <h1>🤖 Anonymous Bot</h1>
-            <div class="stats" id="stats">
-                <div class="stat-item">
-                    <span class="stat-label">Всего сообщений:</span>
+            <div class="brand">
+                <div class="brand-logo">🤖</div>
+                <div class="brand-text">
+                    <h1>Anonymous Bot</h1>
+                    <p>Панель администратора</p>
+                </div>
+            </div>
+
+            <div class="stats">
+                <div class="stat">
+                    <span class="stat-label">Сообщений</span>
                     <span class="stat-value" id="total-messages">0</span>
                 </div>
-                <div class="stat-item">
-                    <span class="stat-label">Без ответа:</span>
-                    <span class="stat-value unanswered" id="unanswered-messages">0</span>
+                <div class="stat">
+                    <span class="stat-label">Без ответа</span>
+                    <span class="stat-value warn" id="unanswered-messages">0</span>
                 </div>
-                <div class="stat-item">
-                    <span class="stat-label">Пользователей:</span>
+                <div class="stat">
+                    <span class="stat-label">Пользователей</span>
                     <span class="stat-value" id="unique-users">0</span>
                 </div>
             </div>
+
+            <div class="header-actions">
+                <button class="icon-btn" id="theme-toggle" title="Сменить тему" aria-label="Сменить тему">🌙</button>
+            </div>
         </header>
 
-        <div class="main-content">
-            <!-- Список чатов -->
-            <aside class="chats-sidebar">
+        <!-- Основная область -->
+        <div class="main">
+            <!-- Sidebar -->
+            <aside class="sidebar">
                 <div class="sidebar-header">
-                    <h2>Чаты</h2>
-                    <button class="refresh-btn" onclick="loadChats()">🔄</button>
-                </div>
-                <div class="chats-list" id="chats-list">
-                    <div class="loading">Загрузка...</div>
-                </div>
-            </aside>
-
-            <!-- Область сообщений -->
-            <main class="messages-area">
-                <div class="welcome-screen" id="welcome-screen">
-                    <div class="welcome-content">
-                        <h2>👋 Добро пожаловать!</h2>
-                        <p>Выберите чат слева, чтобы просмотреть сообщения</p>
+                    <div class="sidebar-title">
+                        <h2>Чаты</h2>
+                        <button class="icon-btn" id="refresh-btn" title="Обновить" aria-label="Обновить">🔄</button>
+                    </div>
+                    <div class="search">
+                        <span class="search-icon">🔍</span>
+                        <input
+                            type="text"
+                            id="search-input"
+                            placeholder="Поиск по имени, @username, ID…"
+                            autocomplete="off"
+                        >
                     </div>
                 </div>
 
-                <div class="chat-container" id="chat-container" style="display: none;">
-                    <div class="chat-header" id="chat-header">
-                        <div class="user-info">
-                            <h3 id="chat-user-name">Пользователь</h3>
-                            <span class="user-id" id="chat-user-id">ID: </span>
+                <div class="chats-list" id="chats-list">
+                    <div class="empty-state">
+                        <div class="empty-icon">⏳</div>
+                        <p>Загрузка…</p>
+                    </div>
+                </div>
+            </aside>
+
+            <!-- Рабочая область -->
+            <main class="workspace">
+                <!-- Приветственный экран -->
+                <div class="welcome" id="welcome-screen">
+                    <div class="welcome-content">
+                        <div class="welcome-icon">💬</div>
+                        <h2>Добро пожаловать!</h2>
+                        <p>Выберите чат слева, чтобы посмотреть сообщения и ответить пользователю. Бот принимает текст, фото, видео, документы, голосовые, кружки, стикеры и GIF.</p>
+                    </div>
+                </div>
+
+                <!-- Чат -->
+                <div class="chat" id="chat-container" style="display: none;">
+                    <div class="chat-header">
+                        <div class="chat-header-info">
+                            <div class="avatar lg" id="chat-user-avatar">?</div>
+                            <div class="chat-header-text">
+                                <h3 id="chat-user-name">Пользователь</h3>
+                                <span class="user-id" id="chat-user-id">ID: —</span>
+                            </div>
                         </div>
-                        <button class="new-message-btn" onclick="toggleNewMessageForm()">
+                        <button class="btn btn-success" id="btn-new-message">
                             ✉️ Написать сообщение
                         </button>
                     </div>
 
-                    <!-- Форма для нового сообщения -->
+                    <!-- Форма нового сообщения -->
                     <div class="new-message-form" id="new-message-form" style="display: none;">
                         <div class="form-header">
                             <h4>📩 Новое сообщение пользователю</h4>
-                            <button class="close-btn" onclick="toggleNewMessageForm()">✕</button>
+                            <button class="close-btn" id="btn-close-new" title="Закрыть">✕</button>
                         </div>
                         <textarea
                             id="new-message-input"
-                            placeholder="Введите сообщение..."
-                            rows="4"
+                            placeholder="Введите текст сообщения… (Ctrl+Enter — отправить, Esc — закрыть)"
+                            rows="3"
                         ></textarea>
                         <div class="form-actions">
-                            <button class="cancel-btn" onclick="toggleNewMessageForm()">Отмена</button>
-                            <button class="send-new-btn" onclick="sendNewMessage()">
-                                📤 Отправить
-                            </button>
+                            <button class="btn btn-secondary" id="btn-cancel-new">Отмена</button>
+                            <button class="btn btn-success" id="btn-send-new">📤 Отправить</button>
                         </div>
                     </div>
 
-                    <div class="messages-container" id="messages-container">
-                        <!-- Сообщения будут загружены здесь -->
-                    </div>
+                    <!-- Контейнер сообщений -->
+                    <div class="messages-container" id="messages-container"></div>
 
+                    <!-- Форма ответа -->
                     <div class="reply-form">
-                        <textarea 
-                            id="reply-input" 
-                            placeholder="Напишите ответ..." 
-                            rows="3"
-                        ></textarea>
-                        <button class="send-btn" onclick="sendReply()">
-                            📤 Отправить
-                        </button>
+                        <div class="reply-row">
+                            <textarea
+                                id="reply-input"
+                                placeholder="Напишите ответ… (Ctrl+Enter — отправить)"
+                                rows="2"
+                            ></textarea>
+                            <button class="btn btn-primary" id="btn-send-reply">
+                                📤 Ответить
+                            </button>
+                        </div>
+                        <div class="reply-hint" id="reply-hint">
+                            Ответ будет привязан к последнему неотвеченному сообщению.
+                        </div>
                     </div>
                 </div>
             </main>
         </div>
     </div>
 
+    <!-- Уведомления -->
+    <div class="notifications" id="notifications" aria-live="polite"></div>
+
     <script src="/static/js/app.js"></script>
 </body>
 </html>
-

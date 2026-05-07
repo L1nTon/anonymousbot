@@ -1,394 +1,622 @@
-// Глобальные переменные
-let currentUserId = null;
-let currentMessageId = null;
-let chatsData = [];
+// ============================================================
+// Anonymous Bot — Панель управления
+// ============================================================
 
-// Загрузка статистики
+// Глобальное состояние
+const state = {
+    currentUserId: null,
+    currentMessageId: null,
+    chats: [],
+    searchQuery: '',
+    isLoadingChats: false,
+};
+
+// ============================================================
+// Утилиты
+// ============================================================
+
+function $(id) {
+    return document.getElementById(id);
+}
+
+function escapeHtml(text) {
+    if (text === null || text === undefined) return '';
+    const div = document.createElement('div');
+    div.textContent = String(text);
+    return div.innerHTML.replace(/\n/g, '<br>');
+}
+
+function formatTime(timestamp) {
+    if (!timestamp) return '';
+
+    // SQLite TIMESTAMP DEFAULT CURRENT_TIMESTAMP возвращает UTC-время без TZ.
+    // Добавим 'Z', чтобы JS интерпретировал его как UTC, а не как локальное.
+    let ts = timestamp;
+    if (typeof ts === 'string' && !/[zZ]|[+-]\d{2}:?\d{2}$/.test(ts)) {
+        ts = ts.replace(' ', 'T') + 'Z';
+    }
+    const date = new Date(ts);
+    if (isNaN(date.getTime())) return '';
+
+    const now = new Date();
+    const diff = now - date;
+    const isToday =
+        date.getFullYear() === now.getFullYear() &&
+        date.getMonth() === now.getMonth() &&
+        date.getDate() === now.getDate();
+
+    const yesterday = new Date(now);
+    yesterday.setDate(now.getDate() - 1);
+    const isYesterday =
+        date.getFullYear() === yesterday.getFullYear() &&
+        date.getMonth() === yesterday.getMonth() &&
+        date.getDate() === yesterday.getDate();
+
+    const time = date.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+
+    if (isToday) return time;
+    if (isYesterday) return `Вчера, ${time}`;
+    if (diff < 7 * 86400000) {
+        const day = date.toLocaleDateString('ru-RU', { weekday: 'short' });
+        return `${day}, ${time}`;
+    }
+    return date.toLocaleDateString('ru-RU') + ', ' + time;
+}
+
+function getInitials(name) {
+    if (!name || name === 'N/A') return '?';
+    const parts = String(name).trim().split(/\s+/);
+    if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+    return (parts[0][0] + parts[1][0]).toUpperCase();
+}
+
+function colorFromId(id) {
+    // Стабильный цвет аватара по ID
+    const palette = [
+        '#6366f1', '#8b5cf6', '#ec4899', '#f43f5e',
+        '#f97316', '#eab308', '#22c55e', '#10b981',
+        '#06b6d4', '#0ea5e9', '#3b82f6', '#a855f7',
+    ];
+    const hash = Math.abs(Number(id) || 0);
+    return palette[hash % palette.length];
+}
+
+function getDisplayName(userInfo, fallbackId) {
+    if (!userInfo) return `User ${fallbackId}`;
+    if (userInfo.full_name && userInfo.full_name !== 'N/A') return userInfo.full_name;
+    if (userInfo.first_name && userInfo.first_name !== 'N/A') return userInfo.first_name;
+    if (userInfo.username && userInfo.username !== 'N/A') return '@' + userInfo.username;
+    return `User ${fallbackId}`;
+}
+
+const MEDIA_LABELS = {
+    photo: { icon: '🖼', name: 'Фото' },
+    video: { icon: '🎥', name: 'Видео' },
+    animation: { icon: '🎞', name: 'GIF' },
+    document: { icon: '📄', name: 'Документ' },
+    audio: { icon: '🎵', name: 'Аудио' },
+    voice: { icon: '🎤', name: 'Голосовое' },
+    video_note: { icon: '🎬', name: 'Кружок' },
+    sticker: { icon: '😀', name: 'Стикер' },
+};
+
+function mediaPreviewText(type) {
+    const m = MEDIA_LABELS[type];
+    return m ? `${m.icon} ${m.name}` : '📎 Медиа';
+}
+
+function renderMediaBlock(mediaType, url, options = {}) {
+    if (!mediaType) return '';
+    const safeUrl = encodeURI(url);
+    const m = MEDIA_LABELS[mediaType] || { icon: '📎', name: 'Медиа' };
+
+    switch (mediaType) {
+        case 'photo':
+        case 'sticker':
+            return `<div class="media media-image">
+                <img src="${safeUrl}" loading="lazy" alt="${m.name}">
+            </div>`;
+        case 'animation':
+            return `<div class="media media-image">
+                <img src="${safeUrl}" loading="lazy" alt="GIF">
+            </div>`;
+        case 'video':
+        case 'video_note':
+            return `<div class="media media-video ${mediaType === 'video_note' ? 'is-round' : ''}">
+                <video src="${safeUrl}" controls preload="metadata"></video>
+            </div>`;
+        case 'voice':
+        case 'audio':
+            return `<div class="media media-audio">
+                <span class="media-icon">${m.icon}</span>
+                <audio src="${safeUrl}" controls preload="metadata"></audio>
+            </div>`;
+        case 'document':
+        default:
+            return `<a class="media media-file" href="${safeUrl}" target="_blank" rel="noopener">
+                <span class="media-file-icon">${m.icon}</span>
+                <span class="media-file-meta">
+                    <span class="media-file-name">${m.name}</span>
+                    <span class="media-file-action">Открыть / скачать</span>
+                </span>
+            </a>`;
+    }
+}
+
+// ============================================================
+// API
+// ============================================================
+
+async function api(url, options = {}) {
+    const res = await fetch(url, options);
+    if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        throw new Error(`HTTP ${res.status}: ${text}`);
+    }
+    return res.json();
+}
+
+// ============================================================
+// Загрузка данных
+// ============================================================
+
 async function loadStats() {
     try {
-        const response = await fetch('/api/stats');
-        const stats = await response.json();
-        
-        document.getElementById('total-messages').textContent = stats.total_messages;
-        document.getElementById('unanswered-messages').textContent = stats.unanswered_messages;
-        document.getElementById('unique-users').textContent = stats.unique_users;
+        const stats = await api('/api/stats');
+        $('total-messages').textContent = stats.total_messages ?? 0;
+        $('unanswered-messages').textContent = stats.unanswered_messages ?? 0;
+        // Поддерживаем оба имени поля для обратной совместимости
+        $('unique-users').textContent =
+            stats.unique_users ?? stats.total_users ?? 0;
     } catch (error) {
         console.error('Ошибка загрузки статистики:', error);
     }
 }
 
-// Загрузка списка чатов
-async function loadChats() {
+async function loadChats(silent = false) {
+    if (state.isLoadingChats) return;
+    state.isLoadingChats = true;
     try {
-        const response = await fetch('/api/chats');
-        chatsData = await response.json();
-        
-        const chatsList = document.getElementById('chats-list');
-        
-        if (chatsData.length === 0) {
-            chatsList.innerHTML = '<div class="loading">Нет сообщений</div>';
-            return;
-        }
-        
-        chatsList.innerHTML = '';
-        
-        chatsData.forEach(chat => {
-            const chatItem = document.createElement('div');
-            chatItem.className = 'chat-item';
-            if (currentUserId === chat.user_id) {
-                chatItem.classList.add('active');
-            }
-            
-            const userName = chat.user_info.full_name !== 'N/A'
-                ? chat.user_info.full_name
-                : `User ${chat.user_id}`;
-
-            const lastMessage = chat.messages && chat.messages.length > 0 ? chat.messages[chat.messages.length - 1] : null;
-            const messagePreview = lastMessage ? lastMessage.text.substring(0, 50) : '👋 Нажал /start';
-
-            // Определяем время для отображения
-            const displayTime = chat.last_message_time || chat.last_seen;
-
-            chatItem.innerHTML = `
-                <div class="chat-item-header">
-                    <span class="chat-user-name">${userName}</span>
-                    ${chat.unread_count > 0 ? `<span class="chat-badge">${chat.unread_count}</span>` : ''}
-                </div>
-                <div class="chat-preview">${messagePreview}${lastMessage && lastMessage.text.length > 50 ? '...' : ''}</div>
-                <div class="chat-time">${formatTime(displayTime)}</div>
-            `;
-            
-            chatItem.onclick = function() { openChat(chat.user_id, this); };
-            chatsList.appendChild(chatItem);
-        });
-        
-        loadStats();
+        state.chats = await api('/api/chats');
+        renderChats();
+        if (!silent) loadStats();
     } catch (error) {
         console.error('Ошибка загрузки чатов:', error);
+        if (!silent) {
+            $('chats-list').innerHTML =
+                '<div class="empty-state"><p>⚠️ Не удалось загрузить чаты</p></div>';
+        }
+    } finally {
+        state.isLoadingChats = false;
     }
 }
 
-// Открыть чат с пользователем
-async function openChat(userId, clickedElement) {
-    currentUserId = userId;
+function renderChats() {
+    const list = $('chats-list');
+    const q = state.searchQuery.trim().toLowerCase();
 
-    // Обновляем активный чат в списке
-    document.querySelectorAll('.chat-item').forEach(item => {
-        item.classList.remove('active');
-    });
-    if (clickedElement) {
-        clickedElement.classList.add('active');
+    let chats = state.chats;
+    if (q) {
+        chats = chats.filter((c) => {
+            const name = getDisplayName(c.user_info, c.user_id).toLowerCase();
+            const username = (c.user_info?.username || '').toLowerCase();
+            const idStr = String(c.user_id);
+            return name.includes(q) || username.includes(q) || idStr.includes(q);
+        });
     }
 
-    // Скрываем приветственный экран
-    document.getElementById('welcome-screen').style.display = 'none';
-    document.getElementById('chat-container').style.display = 'flex';
+    if (chats.length === 0) {
+        list.innerHTML = `
+            <div class="empty-state">
+                <div class="empty-icon">💭</div>
+                <p>${q ? 'Ничего не найдено' : 'Пока нет чатов'}</p>
+            </div>`;
+        return;
+    }
 
-    // Загружаем сообщения
+    list.innerHTML = '';
+    for (const chat of chats) {
+        const name = getDisplayName(chat.user_info, chat.user_id);
+        const lastMsg =
+            chat.messages && chat.messages.length > 0
+                ? chat.messages[chat.messages.length - 1]
+                : null;
+
+        let preview = '';
+        if (lastMsg) {
+            const prefix = lastMsg.is_from_admin ? '↩ ' : '';
+            let text = (lastMsg.text || '').replace(/\s+/g, ' ').trim();
+            if (lastMsg.has_media || lastMsg.media_type) {
+                const mediaLabel = mediaPreviewText(lastMsg.media_type);
+                text = text ? `${mediaLabel} · ${text}` : mediaLabel;
+            }
+            if (!text) text = '(пусто)';
+            preview =
+                prefix +
+                (text.length > 60 ? text.slice(0, 60) + '…' : text);
+        } else {
+            preview = '👋 Запустил бота';
+        }
+
+        const displayTime = chat.last_message_time || chat.last_seen;
+        const isActive = state.currentUserId === chat.user_id;
+        const initials = getInitials(name);
+        const avatarColor = colorFromId(chat.user_id);
+
+        const item = document.createElement('div');
+        item.className = 'chat-item' + (isActive ? ' active' : '');
+        item.innerHTML = `
+            <div class="avatar" style="background:${avatarColor}">${initials}</div>
+            <div class="chat-item-body">
+                <div class="chat-item-row">
+                    <span class="chat-item-name">${escapeHtml(name)}</span>
+                    <span class="chat-item-time">${formatTime(displayTime)}</span>
+                </div>
+                <div class="chat-item-row">
+                    <span class="chat-item-preview">${escapeHtml(preview)}</span>
+                    ${chat.unread_count > 0
+                        ? `<span class="badge">${chat.unread_count}</span>`
+                        : ''}
+                </div>
+            </div>`;
+        item.addEventListener('click', () => openChat(chat.user_id));
+        list.appendChild(item);
+    }
+}
+
+async function openChat(userId) {
+    state.currentUserId = userId;
+
+    document.querySelectorAll('.chat-item').forEach((el) =>
+        el.classList.remove('active')
+    );
+    // Помечаем активный
+    renderChats();
+
+    $('welcome-screen').style.display = 'none';
+    $('chat-container').style.display = 'flex';
+
     await loadMessages(userId);
 }
 
-// Загрузка сообщений пользователя
 async function loadMessages(userId) {
     try {
-        const response = await fetch(`/api/messages/${userId}`);
-        const messages = await response.json();
-
-        const messagesContainer = document.getElementById('messages-container');
-        const chatUserName = document.getElementById('chat-user-name');
-        const chatUserId = document.getElementById('chat-user-id');
-
-        // Находим информацию о пользователе из chatsData
-        const chatData = chatsData.find(chat => chat.user_id === userId);
-
-        // Обновляем заголовок
-        if (chatData) {
-            const userName = chatData.user_info.full_name !== 'N/A'
-                ? chatData.user_info.full_name
-                : `User ${userId}`;
-            chatUserName.textContent = userName;
-            chatUserId.textContent = `ID: ${userId}`;
-        } else if (messages.length > 0) {
-            const userInfo = messages[0].user_info;
-            const userName = userInfo.full_name !== 'N/A'
-                ? userInfo.full_name
-                : `User ${userId}`;
-            chatUserName.textContent = userName;
-            chatUserId.textContent = `ID: ${userId}`;
-        }
-
-        // Очищаем контейнер
-        messagesContainer.innerHTML = '';
-
-        // Если нет сообщений, показываем информацию
-        if (messages.length === 0) {
-            messagesContainer.innerHTML = `
-                <div class="no-messages">
-                    <p>📭 Пользователь еще не отправлял сообщений</p>
-                    <p style="color: #888; font-size: 14px;">Вы можете отправить первое сообщение, нажав кнопку "✉️ Написать сообщение"</p>
-                </div>
-            `;
-            return;
-        }
-
-        // Отображаем сообщения
-        messages.forEach(message => {
-            const messageGroup = document.createElement('div');
-            messageGroup.className = 'message-group';
-            
-            // Сообщение пользователя
-            const userBubble = document.createElement('div');
-            userBubble.className = 'message-bubble user-message';
-            userBubble.innerHTML = `
-                <div class="message-header">
-                    <span>👤 Пользователь</span>
-                    <span>ID: ${message.message_id}</span>
-                </div>
-                <div class="message-text">${escapeHtml(message.text)}</div>
-                <div class="message-time">${formatTime(message.timestamp)}</div>
-            `;
-            messageGroup.appendChild(userBubble);
-            
-            // Ответ администратора (если есть)
-            if (message.admin_reply) {
-                const adminBubble = document.createElement('div');
-                adminBubble.className = 'message-bubble admin-message';
-                adminBubble.innerHTML = `
-                    <div class="message-header">
-                        <span>👨‍💼 Администратор</span>
-                    </div>
-                    <div class="message-text">${escapeHtml(message.admin_reply)}</div>
-                    <div class="message-time">${formatTime(message.admin_reply_timestamp)}</div>
-                `;
-                messageGroup.appendChild(adminBubble);
-            } else {
-                // Сохраняем ID последнего неотвеченного сообщения
-                currentMessageId = message.message_id;
-            }
-            
-            messagesContainer.appendChild(messageGroup);
-        });
-        
-        // Прокручиваем вниз
-        messagesContainer.scrollTop = messagesContainer.scrollHeight;
+        const messages = await api(`/api/messages/${userId}`);
+        renderMessages(userId, messages);
     } catch (error) {
         console.error('Ошибка загрузки сообщений:', error);
     }
 }
 
-// Переключение формы нового сообщения
-function toggleNewMessageForm() {
-    const form = document.getElementById('new-message-form');
-    const input = document.getElementById('new-message-input');
+function renderMessages(userId, messages) {
+    const container = $('messages-container');
+    const chatData = state.chats.find((c) => c.user_id === userId);
 
-    if (form.style.display === 'none') {
+    // Заголовок чата
+    let userInfo = chatData?.user_info;
+    if (!userInfo && messages.length > 0) userInfo = messages[0].user_info;
+
+    const name = getDisplayName(userInfo, userId);
+    const initials = getInitials(name);
+    const color = colorFromId(userId);
+
+    $('chat-user-avatar').textContent = initials;
+    $('chat-user-avatar').style.background = color;
+    $('chat-user-name').textContent = name;
+
+    let subtitle = `ID: ${userId}`;
+    if (userInfo?.username && userInfo.username !== 'N/A') {
+        subtitle = `@${userInfo.username} · ${subtitle}`;
+    }
+    $('chat-user-id').textContent = subtitle;
+
+    container.innerHTML = '';
+    state.currentMessageId = null;
+
+    if (!messages || messages.length === 0) {
+        container.innerHTML = `
+            <div class="empty-state">
+                <div class="empty-icon">📭</div>
+                <p>Сообщений пока нет</p>
+                <p class="muted">Можно отправить первое — кнопка «Написать сообщение» выше</p>
+            </div>`;
+        return;
+    }
+
+    // Сохраняем ID последнего сообщения от пользователя без ответа
+    let lastUnansweredId = null;
+
+    for (const msg of messages) {
+        const isFromAdmin = !!msg.is_from_admin;
+        const replies = Array.isArray(msg.replies) ? msg.replies : [];
+
+        if (!isFromAdmin && replies.length === 0) {
+            lastUnansweredId = msg.message_id;
+        }
+
+        const group = document.createElement('div');
+        group.className = 'message-group';
+
+        const bubble = document.createElement('div');
+        bubble.className =
+            'message-bubble ' + (isFromAdmin ? 'admin-message' : 'user-message');
+
+        const labelIcon = isFromAdmin ? '👨‍💼' : '👤';
+        const labelText = isFromAdmin ? 'Администратор' : 'Пользователь';
+        const status = isFromAdmin
+            ? '<span class="status sent">отправлено</span>'
+            : replies.length > 0
+                ? '<span class="status answered">отвечено</span>'
+                : '<span class="status pending">ожидает ответа</span>';
+
+        const mediaHtml = msg.has_media
+            ? renderMediaBlock(
+                  msg.media_type,
+                  `/api/media/message/${encodeURIComponent(msg.message_id)}`
+              )
+            : '';
+
+        // Текст: для медиа — caption, для текста — основной текст
+        const bodyText = (msg.caption && msg.has_media) ? msg.caption : msg.text;
+
+        bubble.innerHTML = `
+            <div class="message-header">
+                <span class="message-author">${labelIcon} ${labelText}</span>
+                ${status}
+            </div>
+            ${mediaHtml}
+            ${bodyText ? `<div class="message-text">${escapeHtml(bodyText)}</div>` : ''}
+            <div class="message-footer">
+                <span class="message-id" title="ID сообщения">#${escapeHtml(msg.message_id)}</span>
+                <span class="message-time">${formatTime(msg.timestamp)}</span>
+            </div>`;
+        group.appendChild(bubble);
+
+        // Ответы администратора
+        for (const reply of replies) {
+            const rb = document.createElement('div');
+            rb.className = 'message-bubble admin-message reply';
+
+            const replyMediaHtml = reply.has_media && reply.reply_id != null
+                ? renderMediaBlock(
+                      reply.media_type,
+                      `/api/media/reply/${encodeURIComponent(reply.reply_id)}`
+                  )
+                : '';
+            const replyBody =
+                (reply.caption && reply.has_media) ? reply.caption : reply.reply_text;
+
+            rb.innerHTML = `
+                <div class="message-header">
+                    <span class="message-author">↩ Ответ администратора</span>
+                </div>
+                ${replyMediaHtml}
+                ${replyBody ? `<div class="message-text">${escapeHtml(replyBody)}</div>` : ''}
+                <div class="message-footer">
+                    <span class="message-time">${formatTime(reply.timestamp)}</span>
+                </div>`;
+            group.appendChild(rb);
+        }
+
+        container.appendChild(group);
+    }
+
+    state.currentMessageId = lastUnansweredId;
+    updateReplyFormHint();
+
+    requestAnimationFrame(() => {
+        container.scrollTop = container.scrollHeight;
+    });
+}
+
+function updateReplyFormHint() {
+    const hint = $('reply-hint');
+    if (!hint) return;
+    if (state.currentMessageId) {
+        hint.textContent = `Ответ будет привязан к сообщению #${state.currentMessageId}`;
+        hint.classList.remove('warn');
+    } else {
+        hint.textContent = 'Нет неотвеченных сообщений — используйте «Написать сообщение»';
+        hint.classList.add('warn');
+    }
+}
+
+// ============================================================
+// Действия
+// ============================================================
+
+function toggleNewMessageForm() {
+    const form = $('new-message-form');
+    const input = $('new-message-input');
+    const isHidden = form.style.display === 'none' || !form.style.display;
+
+    if (isHidden) {
         form.style.display = 'block';
-        input.focus();
+        setTimeout(() => input.focus(), 50);
     } else {
         form.style.display = 'none';
         input.value = '';
     }
 }
 
-// Отправка нового сообщения пользователю
 async function sendNewMessage() {
-    const messageInput = document.getElementById('new-message-input');
-    const messageText = messageInput.value.trim();
+    const input = $('new-message-input');
+    const text = input.value.trim();
+    const btn = $('btn-send-new');
 
-    if (!messageText) {
-        alert('Введите текст сообщения');
+    if (!text) {
+        showNotification('Введите текст сообщения', 'error');
+        return;
+    }
+    if (!state.currentUserId) {
+        showNotification('Не выбран пользователь', 'error');
         return;
     }
 
-    if (!currentUserId) {
-        alert('Не выбран пользователь');
-        return;
-    }
-
+    setLoading(btn, true);
     try {
-        const response = await fetch('/api/send_message', {
+        const result = await api('/api/send_message', {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                user_id: currentUserId,
-                message_text: messageText
-            })
+                user_id: state.currentUserId,
+                message_text: text,
+            }),
         });
-
-        const result = await response.json();
-
         if (result.success) {
-            // Очищаем поле ввода и скрываем форму
-            messageInput.value = '';
+            input.value = '';
             toggleNewMessageForm();
-
-            // Показываем уведомление
-            showNotification('✅ Сообщение отправлено!', 'success');
+            showNotification('Сообщение отправлено', 'success');
+            await loadMessages(state.currentUserId);
+            await loadChats(true);
         } else {
-            showNotification('❌ Ошибка: ' + result.error, 'error');
+            showNotification('Ошибка: ' + result.error, 'error');
         }
     } catch (error) {
-        console.error('Ошибка отправки сообщения:', error);
-        showNotification('❌ Ошибка отправки сообщения', 'error');
+        console.error(error);
+        showNotification('Не удалось отправить сообщение', 'error');
+    } finally {
+        setLoading(btn, false);
     }
 }
 
-// Отправка ответа
 async function sendReply() {
-    const replyInput = document.getElementById('reply-input');
-    const replyText = replyInput.value.trim();
+    const input = $('reply-input');
+    const text = input.value.trim();
+    const btn = $('btn-send-reply');
 
-    if (!replyText) {
-        alert('Введите текст ответа');
+    if (!text) {
+        showNotification('Введите текст ответа', 'error');
+        return;
+    }
+    if (!state.currentMessageId) {
+        showNotification('Нет сообщения для ответа. Используйте «Написать сообщение».', 'error');
         return;
     }
 
-    if (!currentMessageId) {
-        alert('Не выбрано сообщение для ответа');
-        return;
-    }
-
+    setLoading(btn, true);
     try {
-        const response = await fetch('/api/send_reply', {
+        const result = await api('/api/send_reply', {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                message_id: currentMessageId,
-                reply_text: replyText
-            })
+                message_id: state.currentMessageId,
+                reply_text: text,
+            }),
         });
-
-        const result = await response.json();
-
         if (result.success) {
-            // Очищаем поле ввода
-            replyInput.value = '';
-
-            // Перезагружаем сообщения
-            await loadMessages(currentUserId);
-
-            // Перезагружаем список чатов
-            await loadChats();
-
-            // Показываем уведомление
-            showNotification('✅ Ответ отправлен!', 'success');
+            input.value = '';
+            showNotification('Ответ отправлен', 'success');
+            await loadMessages(state.currentUserId);
+            await loadChats(true);
         } else {
-            showNotification('❌ Ошибка: ' + result.error, 'error');
+            showNotification('Ошибка: ' + result.error, 'error');
         }
     } catch (error) {
-        console.error('Ошибка отправки ответа:', error);
-        showNotification('❌ Ошибка отправки ответа', 'error');
+        console.error(error);
+        showNotification('Не удалось отправить ответ', 'error');
+    } finally {
+        setLoading(btn, false);
     }
 }
 
-// Форматирование времени
-function formatTime(timestamp) {
-    if (!timestamp) return '';
-
-    const date = new Date(timestamp);
-    const now = new Date();
-    const diff = now - date;
-
-    // Если сегодня
-    if (diff < 86400000 && date.getDate() === now.getDate()) {
-        return date.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
-    }
-
-    // Если вчера
-    if (diff < 172800000 && date.getDate() === now.getDate() - 1) {
-        return 'Вчера ' + date.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
-    }
-
-    // Иначе полная дата
-    return date.toLocaleDateString('ru-RU') + ' ' + date.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+function setLoading(btn, loading) {
+    if (!btn) return;
+    btn.disabled = loading;
+    btn.classList.toggle('is-loading', loading);
 }
 
-// Экранирование HTML
-function escapeHtml(text) {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
-}
+// ============================================================
+// Уведомления
+// ============================================================
 
-// Показать уведомление
 function showNotification(message, type = 'info') {
-    // Создаем элемент уведомления
-    const notification = document.createElement('div');
-    notification.style.cssText = `
-        position: fixed;
-        top: 20px;
-        right: 20px;
-        padding: 15px 25px;
-        background: ${type === 'success' ? '#4caf50' : '#f44336'};
-        color: white;
-        border-radius: 10px;
-        box-shadow: 0 5px 15px rgba(0,0,0,0.3);
-        z-index: 10000;
-        animation: slideIn 0.3s ease;
-    `;
-    notification.textContent = message;
+    const note = document.createElement('div');
+    note.className = `notification notification-${type}`;
+    note.innerHTML = `
+        <span class="notification-icon">${
+            type === 'success' ? '✅' : type === 'error' ? '⚠️' : 'ℹ️'
+        }</span>
+        <span>${escapeHtml(message)}</span>`;
+    $('notifications').appendChild(note);
 
-    document.body.appendChild(notification);
-
-    // Удаляем через 3 секунды
     setTimeout(() => {
-        notification.style.animation = 'slideOut 0.3s ease';
-        setTimeout(() => notification.remove(), 300);
+        note.classList.add('hide');
+        setTimeout(() => note.remove(), 300);
     }, 3000);
 }
 
-// Автообновление каждые 10 секунд
-setInterval(() => {
-    loadChats();
-    if (currentUserId) {
-        loadMessages(currentUserId);
-    }
-}, 10000);
+// ============================================================
+// Тема
+// ============================================================
 
-// Обработка Enter в поле ввода
+const THEME_KEY = 'anonbot-theme';
+
+function applyTheme(theme) {
+    document.documentElement.dataset.theme = theme;
+    const btn = $('theme-toggle');
+    if (btn) btn.textContent = theme === 'dark' ? '☀️' : '🌙';
+}
+
+function initTheme() {
+    const saved = localStorage.getItem(THEME_KEY);
+    const prefersDark =
+        window.matchMedia &&
+        window.matchMedia('(prefers-color-scheme: dark)').matches;
+    applyTheme(saved || (prefersDark ? 'dark' : 'light'));
+}
+
+function toggleTheme() {
+    const cur = document.documentElement.dataset.theme || 'light';
+    const next = cur === 'dark' ? 'light' : 'dark';
+    localStorage.setItem(THEME_KEY, next);
+    applyTheme(next);
+}
+
+// ============================================================
+// Инициализация
+// ============================================================
+
 document.addEventListener('DOMContentLoaded', () => {
-    const replyInput = document.getElementById('reply-input');
+    initTheme();
 
+    $('theme-toggle').addEventListener('click', toggleTheme);
+    $('refresh-btn').addEventListener('click', () => loadChats(false));
+    $('btn-new-message').addEventListener('click', toggleNewMessageForm);
+    $('btn-cancel-new').addEventListener('click', toggleNewMessageForm);
+    $('btn-close-new').addEventListener('click', toggleNewMessageForm);
+    $('btn-send-new').addEventListener('click', sendNewMessage);
+    $('btn-send-reply').addEventListener('click', sendReply);
+
+    const search = $('search-input');
+    search.addEventListener('input', (e) => {
+        state.searchQuery = e.target.value;
+        renderChats();
+    });
+
+    const replyInput = $('reply-input');
     replyInput.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' && !e.shiftKey) {
+        if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
             e.preventDefault();
             sendReply();
         }
     });
 
-    // Загружаем данные при старте
+    const newInput = $('new-message-input');
+    newInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+            e.preventDefault();
+            sendNewMessage();
+        }
+        if (e.key === 'Escape') toggleNewMessageForm();
+    });
+
     loadChats();
     loadStats();
+
+    // Автообновление каждые 10 секунд (тихо)
+    setInterval(() => {
+        loadChats(true);
+        if (state.currentUserId) loadMessages(state.currentUserId);
+    }, 10000);
 });
-
-// Добавляем CSS анимации
-const style = document.createElement('style');
-style.textContent = `
-    @keyframes slideIn {
-        from {
-            transform: translateX(400px);
-            opacity: 0;
-        }
-        to {
-            transform: translateX(0);
-            opacity: 1;
-        }
-    }
-
-    @keyframes slideOut {
-        from {
-            transform: translateX(0);
-            opacity: 1;
-        }
-        to {
-            transform: translateX(400px);
-            opacity: 0;
-        }
-    }
-`;
-document.head.appendChild(style);
-
