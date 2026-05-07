@@ -113,6 +113,8 @@
 
 html, body {
     height: 100%;
+    height: 100dvh;
+    overflow: hidden;
 }
 
 body {
@@ -124,6 +126,26 @@ body {
     line-height: 1.5;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
+    /* Включаем безопасные зоны для iPhone и Android */
+    padding: env(safe-area-inset-top) env(safe-area-inset-right)
+             env(safe-area-inset-bottom) env(safe-area-inset-left);
+    /* На iOS не давать body скроллиться при свайпе */
+    overscroll-behavior: none;
+}
+
+/* На мобильных устройствах убираем hover-стили, которые работают
+   странно на тапах (залипают) */
+@media (hover: none) {
+    .icon-btn:hover,
+    .btn-primary:hover:not(:disabled),
+    .btn-secondary:hover:not(:disabled),
+    .btn-success:hover:not(:disabled),
+    .chat-item:hover,
+    .media-image img:hover {
+        transform: none;
+        box-shadow: var(--shadow-sm);
+        background: initial;
+    }
 }
 
 button {
@@ -143,6 +165,7 @@ input, textarea {
     max-width: 1500px;
     margin: 0 auto;
     height: 100vh;
+    height: 100dvh;
     padding: 16px;
     display: flex;
     flex-direction: column;
@@ -587,6 +610,14 @@ input, textarea {
 .btn.is-loading {
     opacity: 0.6;
     cursor: not-allowed;
+}
+
+.btn .btn-icon { display: none; }
+.btn .btn-text { display: inline; }
+
+/* Кнопка «Назад» — видна только на мобильных */
+.back-btn {
+    display: none !important;
 }
 
 .btn-primary {
@@ -1097,49 +1128,307 @@ input, textarea {
 }
 
 /* ============================================================
-   Responsive
+   Адаптив для планшетов
    ============================================================ */
 
-@media (max-width: 900px) {
-    .app {
-        padding: 8px;
-        gap: 8px;
+@media (max-width: 1024px) {
+    .main {
+        grid-template-columns: 300px 1fr;
+    }
+    .stat { min-width: 100px; }
+}
+
+/* ============================================================
+   МОБИЛЬНАЯ ВЕРСИЯ — Telegram-like UX
+   ============================================================ */
+
+@media (max-width: 768px) {
+    /* Убираем внешние отступы, фон-градиент, скруглённые углы */
+    body {
+        background: var(--bg-page);
     }
 
+    .app {
+        padding: 0;
+        gap: 0;
+        height: 100vh;
+        height: 100dvh;
+        max-width: 100%;
+    }
+
+    /* ----- Хедер: компактный, статистика в одну линию ----- */
     .header {
-        padding: 12px 16px;
-        flex-wrap: wrap;
+        padding: 10px 14px;
+        border-radius: 0;
+        border-left: none;
+        border-right: none;
+        border-top: none;
+        gap: 10px;
+        box-shadow: none;
+    }
+
+    .brand-logo {
+        width: 36px;
+        height: 36px;
+        font-size: 18px;
+    }
+
+    .brand-text h1 {
+        font-size: 16px;
+    }
+
+    .brand-text p {
+        display: none;
     }
 
     .stats {
-        order: 3;
-        width: 100%;
-        justify-content: space-between;
+        gap: 4px;
+        flex-shrink: 1;
+        min-width: 0;
     }
 
     .stat {
         min-width: 0;
-        flex: 1;
-        padding: 6px 10px;
+        padding: 4px 8px;
+        flex-direction: row;
+        align-items: center;
+        gap: 6px;
+    }
+
+    .stat-label {
+        display: none;
     }
 
     .stat-value {
-        font-size: 18px;
+        font-size: 14px;
     }
 
+    .stat::before {
+        font-size: 14px;
+        opacity: 0.7;
+    }
+
+    .stat:nth-child(1)::before { content: '💬'; }
+    .stat:nth-child(2)::before { content: '⏳'; }
+    .stat:nth-child(3)::before { content: '👥'; }
+
+    .header-actions {
+        flex-shrink: 0;
+    }
+
+    .icon-btn {
+        width: 38px;
+        height: 38px;
+    }
+
+    /* ----- Основная зона: переключаемые экраны ----- */
     .main {
         grid-template-columns: 1fr;
+        gap: 0;
+        position: relative;
+        min-height: 0;
     }
 
-    .sidebar {
-        max-height: 40vh;
+    .sidebar,
+    .workspace {
+        border-radius: 0;
+        border-left: none;
+        border-right: none;
+        box-shadow: none;
+        height: 100%;
+    }
+
+    /* Логика двух экранов через data-mobile-view на body */
+    body[data-mobile-view="chat"] .sidebar { display: none; }
+    body[data-mobile-view="list"] .workspace { display: none; }
+
+    /* По умолчанию (когда атрибут не установлен) — показываем оба,
+       но JS на старте всё равно поставит "list" */
+    body:not([data-mobile-view]) .workspace { display: none; }
+
+    /* ----- Sidebar: больше места под чаты ----- */
+    .sidebar-header {
+        padding: 10px 12px;
+        gap: 8px;
+    }
+
+    .sidebar-title h2 {
+        font-size: 15px;
+    }
+
+    .search input {
+        padding: 10px 12px 10px 36px;
+        font-size: 14px;
+    }
+
+    .chats-list {
+        padding: 6px;
+    }
+
+    .chat-item {
+        padding: 12px;
+        gap: 12px;
+    }
+
+    .avatar {
+        width: 46px;
+        height: 46px;
+        font-size: 15px;
+    }
+
+    .chat-item-name {
+        font-size: 15px;
+    }
+
+    .chat-item-preview {
+        font-size: 13px;
+    }
+
+    /* ----- Workspace: чат на весь экран ----- */
+    .chat-header {
+        padding: 10px 12px;
+        gap: 10px;
+        position: sticky;
+        top: 0;
+        z-index: 5;
+    }
+
+    .back-btn {
+        display: flex !important;
+        font-size: 22px;
+        flex-shrink: 0;
+    }
+
+    .chat-header-info .avatar.lg {
+        width: 40px;
+        height: 40px;
+        font-size: 14px;
+    }
+
+    .chat-header-text h3 {
+        font-size: 15px;
+    }
+
+    .chat-header-text .user-id {
+        font-size: 11px;
+    }
+
+    /* Кнопка «Написать сообщение» сворачивается до иконки */
+    .btn-icon-md {
+        padding: 0;
+        width: 40px;
+        height: 40px;
+        justify-content: center;
+        flex-shrink: 0;
+    }
+    .btn-icon-md .btn-text { display: none; }
+    .btn-icon-md .btn-icon { display: inline; font-size: 18px; }
+
+    /* ----- Сообщения ----- */
+    .messages-container {
+        padding: 12px 12px;
     }
 
     .message-bubble {
-        max-width: 90%;
+        max-width: 85%;
+        padding: 9px 12px;
     }
 
     .message-bubble.reply {
-        max-width: 85%;
+        max-width: 80%;
     }
+
+    .message-text {
+        font-size: 15px;
+    }
+
+    .media-image img,
+    .media-video video {
+        max-width: 100%;
+    }
+
+    .media-video.is-round video {
+        width: 180px;
+        height: 180px;
+    }
+
+    /* ----- Форма нового сообщения ----- */
+    .new-message-form {
+        padding: 12px;
+    }
+
+    /* ----- Форма ответа: sticky внизу ----- */
+    .reply-form {
+        padding: 8px 10px calc(8px + env(safe-area-inset-bottom)) 10px;
+        gap: 6px;
+    }
+
+    .reply-row {
+        gap: 6px;
+    }
+
+    .reply-row textarea {
+        min-height: 40px;
+        max-height: 120px;
+        padding: 9px 14px;
+        /* 16px чтобы iOS не зумил при фокусе */
+        font-size: 16px;
+        border-radius: 20px;
+    }
+
+    .new-message-form textarea,
+    .search input {
+        font-size: 16px;
+    }
+
+    .reply-row .btn {
+        padding: 0;
+        width: 44px;
+        height: 44px;
+        flex-shrink: 0;
+        border-radius: 50%;
+        justify-content: center;
+        font-size: 16px;
+    }
+
+    .reply-row .btn .btn-text { display: none; }
+
+    .reply-hint {
+        font-size: 10px;
+    }
+
+    /* ----- Welcome ----- */
+    .welcome-icon { font-size: 48px; }
+    .welcome-content h2 { font-size: 20px; }
+
+    /* ----- Уведомления: ширина по экрану ----- */
+    .notifications {
+        top: calc(8px + env(safe-area-inset-top));
+        right: 8px;
+        left: 8px;
+    }
+
+    .notification {
+        min-width: 0;
+        width: 100%;
+        font-size: 13px;
+    }
+}
+
+/* ----- Очень узкие экраны ----- */
+@media (max-width: 380px) {
+    .stats { display: none; }
+    .brand-text h1 { font-size: 15px; }
+}
+
+/* ----- Landscape orientation на мобильных ----- */
+@media (max-width: 900px) and (orientation: landscape) and (max-height: 500px) {
+    .header {
+        padding: 6px 12px;
+    }
+    .brand-logo { width: 30px; height: 30px; font-size: 14px; }
+    .brand-text h1 { font-size: 14px; }
+    .brand-text p { display: none; }
+    .stat-value { font-size: 13px; }
+    .icon-btn { width: 32px; height: 32px; font-size: 16px; }
 }

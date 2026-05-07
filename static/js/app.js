@@ -12,6 +12,19 @@ const state = {
 };
 
 // ============================================================
+// Mobile view: показываем либо список чатов, либо открытый чат
+// ============================================================
+
+function isMobile() {
+    return window.matchMedia('(max-width: 768px)').matches;
+}
+
+function setMobileView(view) {
+    // view: 'list' | 'chat'
+    document.body.dataset.mobileView = view;
+}
+
+// ============================================================
 // Утилиты
 // ============================================================
 
@@ -276,7 +289,14 @@ async function openChat(userId) {
     $('welcome-screen').style.display = 'none';
     $('chat-container').style.display = 'flex';
 
+    // На мобильных переключаемся в чат-вид
+    setMobileView('chat');
+
     await loadMessages(userId);
+}
+
+function closeChatMobile() {
+    setMobileView('list');
 }
 
 async function loadMessages(userId) {
@@ -580,6 +600,9 @@ function toggleTheme() {
 document.addEventListener('DOMContentLoaded', () => {
     initTheme();
 
+    // Стартовый мобильный режим — список чатов
+    setMobileView('list');
+
     $('theme-toggle').addEventListener('click', toggleTheme);
     $('refresh-btn').addEventListener('click', () => loadChats(false));
     $('btn-new-message').addEventListener('click', toggleNewMessageForm);
@@ -587,6 +610,14 @@ document.addEventListener('DOMContentLoaded', () => {
     $('btn-close-new').addEventListener('click', toggleNewMessageForm);
     $('btn-send-new').addEventListener('click', sendNewMessage);
     $('btn-send-reply').addEventListener('click', sendReply);
+    $('btn-back').addEventListener('click', closeChatMobile);
+
+    // Кнопка телефонного "назад" возвращает к списку
+    window.addEventListener('popstate', () => {
+        if (isMobile() && document.body.dataset.mobileView === 'chat') {
+            closeChatMobile();
+        }
+    });
 
     const search = $('search-input');
     search.addEventListener('input', (e) => {
